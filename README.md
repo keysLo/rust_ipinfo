@@ -23,6 +23,11 @@ A small Actix-web service that performs IP geolocation and ASN lookups using Max
    cargo run
    ```
 
+You should see a startup message:
+```
+服务启动于 http://0.0.0.0:8080/
+```
+
 ### Optional security toggle (ADMIN_LOCAL_ONLY)
 The admin-style endpoints (`/reload`, `/metrics`, `/openapi.json`) can be locked down to localhost if desired. Control this via the
 `ADMIN_LOCAL_ONLY` environment variable at process start:
@@ -39,6 +44,16 @@ Example:
 ADMIN_LOCAL_ONLY=1 cargo run
 
 # Explicitly disable the guard
+| `1`, `true`, `yes`, `on` | Restrict admin endpoints to `127.0.0.1` / `::1`; remote clients receive `403`. |
+| anything else or unset | Admin endpoints remain reachable from any client (default). |
+
+Examples:
+
+```bash
+# Enable localhost-only protection
+ADMIN_LOCAL_ONLY=true cargo run
+
+# Explicitly disable (same as default)
 ADMIN_LOCAL_ONLY=0 cargo run
 ```
 
@@ -63,6 +78,15 @@ ADMIN_LOCAL_ONLY=0 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 When enabled, the server rejects any admin request that includes a non-loopback `X-Forwarded-For` / `Forwarded` address before
 checking the TCP peer; spoofed loopback headers do not bypass the peer check. Any non-loopback IPv4/IPv6 client receives HTTP 403
 on admin endpoints.
+# Start with localhost-only protection enabled
+ADMIN_LOCAL_ONLY=true nohup ./target/release/ipinfo > /dev/null 2>&1 &
+
+# Start without restriction (equivalent to leaving the variable unset)
+ADMIN_LOCAL_ONLY=0 nohup ./target/release/ipinfo > /dev/null 2>&1 &
+```
+
+The `ADMIN_LOCAL_ONLY` variable is read by the process before startup, regardless of whether the service is launched with
+`cargo run`, a systemd unit, or `nohup`.
 
 ## Endpoints
 ### `GET /` — IP lookup

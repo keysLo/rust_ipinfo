@@ -74,6 +74,7 @@ fn get_network(ip: IpAddr, prefix_len: u16) -> String {
             } else {
                 !((1u32 << (32 - p)) - 1)
             };
+            let mask = if p == 0 { 0u32 } else { !((1u32 << (32 - p)) - 1) };
             let network = u32::from(ipv4) & mask;
             format!("{}/{}", Ipv4Addr::from(network), p)
         }
@@ -115,6 +116,13 @@ fn admin_local_only_enabled() -> bool {
             _ => None,
         })
         .unwrap_or(true)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn load_mmap_reader(path: &str) -> IoResult<Reader<Mmap>> {
@@ -188,6 +196,23 @@ fn guard_admin_endpoint(req: &HttpRequest, config: &AppConfig) -> Result<(), Htt
         Err(HttpResponse::Forbidden()
             .content_type("text/plain; charset=utf-8")
             .body(format!("仅允许 127.0.0.1 访问此接口\n详情: {reason}")))
+fn is_local_request(req: &HttpRequest) -> bool {
+    match req.peer_addr().map(|addr| addr.ip()) {
+        Some(IpAddr::V4(v4)) => v4 == Ipv4Addr::LOCALHOST,
+        Some(IpAddr::V6(v6)) => v6 == Ipv6Addr::LOCALHOST,
+        _ => false,
+    }
+}
+
+fn guard_admin_endpoint(req: &HttpRequest, config: &AppConfig) -> Option<HttpResponse> {
+    if !config.restrict_admin_to_localhost {
+        return None;
+    }
+
+    if is_local_request(req) {
+        None
+    } else {
+        Some(HttpResponse::Forbidden().body("仅允许 127.0.0.1 访问此接口"))
     }
 }
 
@@ -206,6 +231,14 @@ async fn lookup(
             .map(|x| x.ip().to_string())
             .unwrap_or_else(|| "0.0.0.0".to_string())
     });
+    let client_ip_str = query
+        .get("ip")
+        .cloned()
+        .unwrap_or_else(|| {
+            req.peer_addr()
+                .map(|x| x.ip().to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string())
+        });
 
     // 2. 解析 IP
     let ip: IpAddr = match client_ip_str.parse() {
@@ -333,6 +366,7 @@ async fn reload(
     let timer = Instant::now();
 
     if let Err(resp) = guard_admin_endpoint(&req, &config) {
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
         let elapsed = timer.elapsed().as_secs_f64();
         HTTP_REQUEST_DURATION_SECONDS
             .with_label_values(&["/reload", req.method().as_str()])
@@ -343,6 +377,9 @@ async fn reload(
 
         return resp;
     }
+
+async fn reload(data: web::Data<DbState>, req: HttpRequest) -> impl Responder {
+    let timer = Instant::now();
 
     match (
         load_mmap_reader("./GeoLite2-City.mmdb"),
@@ -394,6 +431,11 @@ async fn metrics(req: HttpRequest, config: web::Data<AppConfig>) -> impl Respond
         return resp;
     }
 
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
+        return resp;
+    }
+
+async fn metrics() -> impl Responder {
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();
@@ -436,6 +478,11 @@ async fn openapi(req: HttpRequest, config: web::Data<AppConfig>) -> impl Respond
         return resp;
     }
 
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
+        return resp;
+    }
+
+async fn openapi() -> impl Responder {
     let spec = json!({
         "openapi": "3.0.0",
         "info": {
