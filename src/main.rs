@@ -107,6 +107,15 @@ struct AppConfig {
 
 fn admin_local_only_enabled() -> bool {
     env::var("ADMIN_LOCAL_ONLY")
+        .ok()
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .and_then(|normalized| match normalized.as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
         .map(|value| {
             matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -122,6 +131,71 @@ fn load_mmap_reader(path: &str) -> IoResult<Reader<Mmap>> {
     Reader::from_source(mmap).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
+fn parse_ip_from_addr(addr: &str) -> Option<IpAddr> {
+    // Try the full string first (useful when connection info already strips the port).
+    if let Ok(ip) = addr.parse() {
+        return Some(ip);
+    }
+
+    // Handle common "IP:PORT" and "[IPv6]:PORT" formats from connection_info().
+    if let Some(stripped) = addr.strip_prefix('[') {
+        if let Some((ip, _)) = stripped.rsplit_once(']') {
+            return ip.parse().ok();
+        }
+    }
+
+    addr.rsplit_once(':').and_then(|(ip, _)| ip.parse().ok())
+}
+
+fn eval_admin_access(req: &HttpRequest) -> (bool, String) {
+    let forwarded = req
+        .connection_info()
+        .realip_remote_addr()
+        .and_then(parse_ip_from_addr);
+    let peer = req.peer_addr().map(|addr| addr.ip());
+
+    if let Some(real) = forwarded {
+        if !real.is_loopback() {
+            return (
+                false,
+                format!(
+                    "blocked: forwarded={real}, peer={:?} (non-loopback forwarded)",
+                    peer
+                ),
+            );
+        }
+    }
+
+    if let Some(peer_ip) = peer {
+        let allow = peer_ip.is_loopback();
+        let reason = if allow {
+            format!("allowed: forwarded={forwarded:?}, peer={peer_ip} (loopback peer)")
+        } else {
+            format!("blocked: forwarded={forwarded:?}, peer={peer_ip} (non-loopback peer)")
+        };
+        return (allow, reason);
+    }
+
+    // If no peer IP is available, err on the side of blocking.
+    (
+        false,
+        format!("blocked: forwarded={forwarded:?}, peer=None (missing peer address)"),
+    )
+}
+
+fn guard_admin_endpoint(req: &HttpRequest, config: &AppConfig) -> Result<(), HttpResponse> {
+    if !config.restrict_admin_to_localhost {
+        return Ok(());
+    }
+
+    let (allow, reason) = eval_admin_access(req);
+
+    if allow {
+        Ok(())
+    } else {
+        Err(HttpResponse::Forbidden()
+            .content_type("text/plain; charset=utf-8")
+            .body(format!("仅允许 127.0.0.1 访问此接口\n详情: {reason}")))
 fn is_local_request(req: &HttpRequest) -> bool {
     match req.peer_addr().map(|addr| addr.ip()) {
         Some(IpAddr::V4(v4)) => v4 == Ipv4Addr::LOCALHOST,
@@ -291,6 +365,7 @@ async fn reload(
 ) -> impl Responder {
     let timer = Instant::now();
 
+    if let Err(resp) = guard_admin_endpoint(&req, &config) {
     if let Some(resp) = guard_admin_endpoint(&req, &config) {
         let elapsed = timer.elapsed().as_secs_f64();
         HTTP_REQUEST_DURATION_SECONDS
@@ -342,6 +417,20 @@ async fn reload(data: web::Data<DbState>, req: HttpRequest) -> impl Responder {
 
 // Prometheus metrics endpoint
 async fn metrics(req: HttpRequest, config: web::Data<AppConfig>) -> impl Responder {
+    let timer = Instant::now();
+
+    if let Err(resp) = guard_admin_endpoint(&req, &config) {
+        let elapsed = timer.elapsed().as_secs_f64();
+        HTTP_REQUEST_DURATION_SECONDS
+            .with_label_values(&["/metrics", req.method().as_str()])
+            .observe(elapsed);
+        HTTP_REQUESTS_TOTAL
+            .with_label_values(&["/metrics", req.method().as_str(), "403"])
+            .inc();
+
+        return resp;
+    }
+
     if let Some(resp) = guard_admin_endpoint(&req, &config) {
         return resp;
     }
@@ -354,6 +443,20 @@ async fn metrics() -> impl Responder {
         return HttpResponse::InternalServerError().body(format!("encode metrics error: {}", e));
     }
 
+    if buffer.is_empty() {
+        return HttpResponse::Ok()
+            .content_type("text/plain; charset=utf-8")
+            .body("# No metrics recorded yet\n");
+    }
+
+    let elapsed = timer.elapsed().as_secs_f64();
+    HTTP_REQUEST_DURATION_SECONDS
+        .with_label_values(&["/metrics", req.method().as_str()])
+        .observe(elapsed);
+    HTTP_REQUESTS_TOTAL
+        .with_label_values(&["/metrics", req.method().as_str(), "200"])
+        .inc();
+
     HttpResponse::Ok()
         .content_type("text/plain; charset=utf-8")
         .body(buffer)
@@ -361,6 +464,20 @@ async fn metrics() -> impl Responder {
 
 // Swagger/OpenAPI（简易版）
 async fn openapi(req: HttpRequest, config: web::Data<AppConfig>) -> impl Responder {
+    let timer = Instant::now();
+
+    if let Err(resp) = guard_admin_endpoint(&req, &config) {
+        let elapsed = timer.elapsed().as_secs_f64();
+        HTTP_REQUEST_DURATION_SECONDS
+            .with_label_values(&["/openapi.json", req.method().as_str()])
+            .observe(elapsed);
+        HTTP_REQUESTS_TOTAL
+            .with_label_values(&["/openapi.json", req.method().as_str(), "403"])
+            .inc();
+
+        return resp;
+    }
+
     if let Some(resp) = guard_admin_endpoint(&req, &config) {
         return resp;
     }
@@ -444,6 +561,14 @@ async fn openapi() -> impl Responder {
             }
         }
     });
+
+    let elapsed = timer.elapsed().as_secs_f64();
+    HTTP_REQUEST_DURATION_SECONDS
+        .with_label_values(&["/openapi.json", req.method().as_str()])
+        .observe(elapsed);
+    HTTP_REQUESTS_TOTAL
+        .with_label_values(&["/openapi.json", req.method().as_str(), "200"])
+        .inc();
 
     HttpResponse::Ok().json(spec)
 }

@@ -34,6 +34,16 @@ The admin-style endpoints (`/reload`, `/metrics`, `/openapi.json`) can be locked
 
 | Value accepted (case-insensitive) | Effect |
 | --- | --- |
+| `1` (also accepts `true/yes/on`) or unset | **Default.** Restrict admin endpoints to `127.0.0.1` / `::1`; remote clients receive `403`. |
+| `0` (also accepts `false/no/off`) | Admin endpoints remain reachable from any client; the guard is bypassed without evaluating client IPs. |
+
+Example:
+
+```bash
+# Enable localhost-only protection (default)
+ADMIN_LOCAL_ONLY=1 cargo run
+
+# Explicitly disable the guard
 | `1`, `true`, `yes`, `on` | Restrict admin endpoints to `127.0.0.1` / `::1`; remote clients receive `403`. |
 | anything else or unset | Admin endpoints remain reachable from any client (default). |
 
@@ -58,6 +68,16 @@ command:
 # Build the release binary first
 cargo build --release
 
+# Start with localhost-only protection enabled (default)
+ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
+
+# Start without restriction
+ADMIN_LOCAL_ONLY=0 nohup ./target/release/ipinfo > /dev/null 2>&1 &
+```
+
+When enabled, the server rejects any admin request that includes a non-loopback `X-Forwarded-For` / `Forwarded` address before
+checking the TCP peer; spoofed loopback headers do not bypass the peer check. Any non-loopback IPv4/IPv6 client receives HTTP 403
+on admin endpoints.
 # Start with localhost-only protection enabled
 ADMIN_LOCAL_ONLY=true nohup ./target/release/ipinfo > /dev/null 2>&1 &
 
@@ -92,6 +112,9 @@ Exports standard Prometheus text format containing `http_requests_total` and `ht
 ```bash
 curl http://localhost:8080/metrics
 ```
+
+If no requests have been processed yet, the endpoint returns `# No metrics recorded yet` to make it clear the exporter is run
+ning.
 
 ### `GET /openapi.json`
 Returns a minimal OpenAPI 3.0 document describing the available endpoints and the `Output` schema returned by `/`.
