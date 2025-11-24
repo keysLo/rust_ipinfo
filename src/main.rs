@@ -74,6 +74,7 @@ fn get_network(ip: IpAddr, prefix_len: u16) -> String {
             } else {
                 !((1u32 << (32 - p)) - 1)
             };
+            let mask = if p == 0 { 0u32 } else { !((1u32 << (32 - p)) - 1) };
             let network = u32::from(ipv4) & mask;
             format!("{}/{}", Ipv4Addr::from(network), p)
         }
@@ -156,6 +157,14 @@ async fn lookup(
             .map(|x| x.ip().to_string())
             .unwrap_or_else(|| "0.0.0.0".to_string())
     });
+    let client_ip_str = query
+        .get("ip")
+        .cloned()
+        .unwrap_or_else(|| {
+            req.peer_addr()
+                .map(|x| x.ip().to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string())
+        });
 
     // 2. 解析 IP
     let ip: IpAddr = match client_ip_str.parse() {
@@ -294,6 +303,9 @@ async fn reload(
         return resp;
     }
 
+async fn reload(data: web::Data<DbState>, req: HttpRequest) -> impl Responder {
+    let timer = Instant::now();
+
     match (
         load_mmap_reader("./GeoLite2-City.mmdb"),
         load_mmap_reader("./ipinfo_lite.mmdb"),
@@ -334,6 +346,7 @@ async fn metrics(req: HttpRequest, config: web::Data<AppConfig>) -> impl Respond
         return resp;
     }
 
+async fn metrics() -> impl Responder {
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
     let encoder = TextEncoder::new();
@@ -352,6 +365,7 @@ async fn openapi(req: HttpRequest, config: web::Data<AppConfig>) -> impl Respond
         return resp;
     }
 
+async fn openapi() -> impl Responder {
     let spec = json!({
         "openapi": "3.0.0",
         "info": {
