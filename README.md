@@ -28,6 +28,46 @@ You should see a startup message:
 服务启动于 http://0.0.0.0:8080/
 ```
 
+### Optional security toggle (ADMIN_LOCAL_ONLY)
+The admin-style endpoints (`/reload`, `/metrics`, `/openapi.json`) can be locked down to localhost if desired. Control this via the
+`ADMIN_LOCAL_ONLY` environment variable at process start:
+
+| Value accepted (case-insensitive) | Effect |
+| --- | --- |
+| `1`, `true`, `yes`, `on` | Restrict admin endpoints to `127.0.0.1` / `::1`; remote clients receive `403`. |
+| anything else or unset | Admin endpoints remain reachable from any client (default). |
+
+Examples:
+
+```bash
+# Enable localhost-only protection
+ADMIN_LOCAL_ONLY=true cargo run
+
+# Explicitly disable (same as default)
+ADMIN_LOCAL_ONLY=0 cargo run
+```
+
+The flag is read once at startup; restart the service after changing the value.
+
+**`nohup` example**
+
+If you want to keep the process running in the background with stdout/stderr suppressed, set the flag the same way before the
+command:
+
+```bash
+# Build the release binary first
+cargo build --release
+
+# Start with localhost-only protection enabled
+ADMIN_LOCAL_ONLY=true nohup ./target/release/ipinfo > /dev/null 2>&1 &
+
+# Start without restriction (equivalent to leaving the variable unset)
+ADMIN_LOCAL_ONLY=0 nohup ./target/release/ipinfo > /dev/null 2>&1 &
+```
+
+The `ADMIN_LOCAL_ONLY` variable is read by the process before startup, regardless of whether the service is launched with
+`cargo run`, a systemd unit, or `nohup`.
+
 ## Endpoints
 ### `GET /` — IP lookup
 - Optional query parameter: `ip=<IPv4|IPv6>`.
