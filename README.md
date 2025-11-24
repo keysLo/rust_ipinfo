@@ -28,16 +28,6 @@ You should see a startup message:
 服务启动于 http://0.0.0.0:8080/
 ```
 
-### Optional security toggle
-To force `/reload`, `/metrics`, and `/openapi.json` to be accessible **only** from `127.0.0.1` (and `::1`), set the environment
-variable before launching the service:
-
-```bash
-ADMIN_LOCAL_ONLY=true cargo run
-```
-
-By default this toggle is disabled and the endpoints remain reachable from any client.
-
 ## Endpoints
 ### `GET /` — IP lookup
 - Optional query parameter: `ip=<IPv4|IPv6>`.
