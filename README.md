@@ -8,6 +8,7 @@ A small Actix-web service that performs IP geolocation and ASN lookups using Max
 - Prometheus metrics (`/metrics`) for request counts and latency histograms.
 - Hot reload of the database files via `POST /reload` without restarting the server.
 - Lightweight OpenAPI description available at `/openapi.json`.
+- Optional localhost-only protection for admin-style endpoints (`/reload`, `/metrics`, `/openapi.json`).
 
 ## Requirements
 - Rust toolchain (e.g., via `rustup`).

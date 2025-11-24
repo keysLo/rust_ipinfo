@@ -11,6 +11,7 @@ use prometheus::{
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
 use std::io::Result as IoResult;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -68,6 +69,11 @@ fn get_network(ip: IpAddr, prefix_len: u16) -> String {
     match ip {
         IpAddr::V4(ipv4) => {
             let p = prefix_len.min(32);
+            let mask = if p == 0 {
+                0u32
+            } else {
+                !((1u32 << (32 - p)) - 1)
+            };
             let mask = if p == 0 { 0u32 } else { !((1u32 << (32 - p)) - 1) };
             let network = u32::from(ipv4) & mask;
             format!("{}/{}", Ipv4Addr::from(network), p)
@@ -94,10 +100,46 @@ struct DbState {
     cache: DashMap<IpAddr, Output>,
 }
 
+#[derive(Clone)]
+struct AppConfig {
+    restrict_admin_to_localhost: bool,
+}
+
+fn admin_local_only_enabled() -> bool {
+    env::var("ADMIN_LOCAL_ONLY")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn load_mmap_reader(path: &str) -> IoResult<Reader<Mmap>> {
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
     Reader::from_source(mmap).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+fn is_local_request(req: &HttpRequest) -> bool {
+    match req.peer_addr().map(|addr| addr.ip()) {
+        Some(IpAddr::V4(v4)) => v4 == Ipv4Addr::LOCALHOST,
+        Some(IpAddr::V6(v6)) => v6 == Ipv6Addr::LOCALHOST,
+        _ => false,
+    }
+}
+
+fn guard_admin_endpoint(req: &HttpRequest, config: &AppConfig) -> Option<HttpResponse> {
+    if !config.restrict_admin_to_localhost {
+        return None;
+    }
+
+    if is_local_request(req) {
+        None
+    } else {
+        Some(HttpResponse::Forbidden().body("仅允许 127.0.0.1 访问此接口"))
+    }
 }
 
 // ---------------- Handlers ----------------
@@ -110,6 +152,11 @@ async fn lookup(
     let timer = Instant::now();
 
     // 1. 获取 IP 字符串
+    let client_ip_str = query.get("ip").cloned().unwrap_or_else(|| {
+        req.peer_addr()
+            .map(|x| x.ip().to_string())
+            .unwrap_or_else(|| "0.0.0.0".to_string())
+    });
     let client_ip_str = query
         .get("ip")
         .cloned()
@@ -237,6 +284,25 @@ async fn lookup(
     HttpResponse::Ok().json(result)
 }
 
+async fn reload(
+    data: web::Data<DbState>,
+    config: web::Data<AppConfig>,
+    req: HttpRequest,
+) -> impl Responder {
+    let timer = Instant::now();
+
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
+        let elapsed = timer.elapsed().as_secs_f64();
+        HTTP_REQUEST_DURATION_SECONDS
+            .with_label_values(&["/reload", req.method().as_str()])
+            .observe(elapsed);
+        HTTP_REQUESTS_TOTAL
+            .with_label_values(&["/reload", req.method().as_str(), "403"])
+            .inc();
+
+        return resp;
+    }
+
 async fn reload(data: web::Data<DbState>, req: HttpRequest) -> impl Responder {
     let timer = Instant::now();
 
@@ -275,6 +341,11 @@ async fn reload(data: web::Data<DbState>, req: HttpRequest) -> impl Responder {
 }
 
 // Prometheus metrics endpoint
+async fn metrics(req: HttpRequest, config: web::Data<AppConfig>) -> impl Responder {
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
+        return resp;
+    }
+
 async fn metrics() -> impl Responder {
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
@@ -289,6 +360,11 @@ async fn metrics() -> impl Responder {
 }
 
 // Swagger/OpenAPI（简易版）
+async fn openapi(req: HttpRequest, config: web::Data<AppConfig>) -> impl Responder {
+    if let Some(resp) = guard_admin_endpoint(&req, &config) {
+        return resp;
+    }
+
 async fn openapi() -> impl Responder {
     let spec = json!({
         "openapi": "3.0.0",
@@ -381,6 +457,10 @@ async fn main() -> std::io::Result<()> {
     let city_db = load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb 加载失败");
     let asn_db = load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb 加载失败");
 
+    let config = web::Data::new(AppConfig {
+        restrict_admin_to_localhost: admin_local_only_enabled(),
+    });
+
     let state = web::Data::new(DbState {
         city_db: ArcSwap::new(Arc::new(city_db)),
         asn_db: ArcSwap::new(Arc::new(asn_db)),
@@ -390,6 +470,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
+            .app_data(config.clone())
             .route("/", web::get().to(lookup))
             .route("/reload", web::post().to(reload))
             .route("/metrics", web::get().to(metrics))
