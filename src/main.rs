@@ -275,7 +275,7 @@ async fn lookup(
         asn_error: None,
     };
 
-    // ---- GeoLite2-City ²éÑ¯ ----
+    // ---- GeoLite2-City 查询 ----
     let city_reader = state.inner.city_db.load();
     match city_reader.lookup(ip) {
         Ok(lookup) => match lookup.decode::<geoip2::City>() {
@@ -290,18 +290,19 @@ async fn lookup(
                 result.city = english_name(&city.city.names);
             }
             Ok(None) => {
-                result.geolocation_error = Some("IP Î´ÔÚ GeoLite2-City.mmdb ÖÐÕÒµ½".to_string());
+                result.geolocation_error =
+                    Some("IP 未在 GeoLite2-City.mmdb 中找到".to_string());
             }
             Err(e) => {
-                result.geolocation_error = Some(format!("GeoLite2-City ²éÑ¯Ê§°Ü: {}", e));
+                result.geolocation_error = Some(format!("GeoLite2-City 查询失败: {}", e));
             }
         },
         Err(e) => {
-            result.geolocation_error = Some(format!("GeoLite2-City ²éÑ¯Ê§°Ü: {}", e));
+            result.geolocation_error = Some(format!("GeoLite2-City 查询失败: {}", e));
         }
     }
 
-    // ---- ipinfo_lite ²éÑ¯ (ASN) ----
+    // ---- ipinfo_lite 查询 (ASN) ----
     let asn_reader = state.inner.asn_db.load();
     match asn_reader.lookup(ip) {
         Ok(lookup) => {
