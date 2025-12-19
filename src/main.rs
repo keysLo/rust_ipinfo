@@ -7,13 +7,6 @@ use axum::{
 };
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use axum::{
-    extract::{ConnectInfo, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
 use maxminddb::{geoip2, Reader};
 use maxminddb::geoip2::Names;
 use memmap2::Mmap;
@@ -253,7 +246,7 @@ async fn lookup(
             .unwrap_or_else(|| peer.ip().to_string())
     });
 
-    // 2. ½âÎö IP
+    // 2. 解析 IP
     let ip: IpAddr = match client_ip_str.parse() {
         Ok(ip) => ip,
         Err(_) => {
@@ -280,18 +273,18 @@ async fn lookup(
         } else {
             cached.expires_at = now + CACHE_TTL;
             let mut res = cached.data.clone();
-        // Ensure the ip field mirrors the request string (usually identical).
-        res.ip = client_ip_str.clone();
+            // Ensure the ip field mirrors the request string (usually identical).
+            res.ip = client_ip_str.clone();
 
-        let elapsed = timer.elapsed().as_secs_f64();
-        HTTP_REQUEST_DURATION_SECONDS
-            .with_label_values(&["/", "GET"])
-            .observe(elapsed);
-        HTTP_REQUESTS_TOTAL
-            .with_label_values(&["/", "GET", "200"])
-            .inc();
+            let elapsed = timer.elapsed().as_secs_f64();
+            HTTP_REQUEST_DURATION_SECONDS
+                .with_label_values(&["/", "GET"])
+                .observe(elapsed);
+            HTTP_REQUESTS_TOTAL
+                .with_label_values(&["/", "GET", "200"])
+                .inc();
 
-        return Json(res).into_response();
+            return Json(res).into_response();
         }
     }
 
@@ -511,7 +504,7 @@ async fn metrics(
         .into_response()
 }
 
-// Swagger/OpenAPI£¨¼òÒ×°æ£©
+// Swagger/OpenAPI（简易版）
 async fn openapi(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -552,7 +545,7 @@ async fn openapi(
                     ],
                     "responses": {
                         "200": {
-                            "description": "²éÑ¯³É¹¦",
+                            "description": "查询成功",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/Output" }
