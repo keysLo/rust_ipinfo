@@ -205,7 +205,7 @@ fn guard_admin_endpoint(
     if allow {
         Ok(())
     } else {
-        Err((StatusCode::FORBIDDEN, format!("403 \nÏêÇé: {reason}")).into_response())
+        Err((StatusCode::FORBIDDEN, format!("403 \n详情: {reason}")).into_response())
     }
 }
 
@@ -220,7 +220,7 @@ async fn lookup(
     let timer = Instant::now();
     let forwarded = extract_forwarded_ip(&headers);
 
-    // 1. »ñÈ¡ IP ×Ö·û´®
+    // 1. 获取 IP 字符串
     let client_ip_str = query.get("ip").cloned().unwrap_or_else(|| {
         forwarded
             .map(|x| x.to_string())
@@ -237,17 +237,17 @@ async fn lookup(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": format!("·Ç·¨ IP µØÖ·: {}", client_ip_str)
+                    "error": format!("非法 IP 地址: {}", client_ip_str)
                 })),
             )
                 .into_response();
         }
     };
 
-    // 3. »º´æÃüÖÐ
+    // 3. 查询缓存
     if let Some(cached) = state.inner.cache.get(&ip) {
         let mut res = cached.clone();
-        // ±£Ö¤ ip ×Ö¶ÎÊÇÕâ´ÎÇëÇó¿´µ½µÄ×Ö·û´®£¨Í¨³£Ò»Ñù£©
+        // Ensure the ip field mirrors the request string (usually identical).
         res.ip = client_ip_str.clone();
 
         let elapsed = timer.elapsed().as_secs_f64();
@@ -261,7 +261,7 @@ async fn lookup(
         return Json(res).into_response();
     }
 
-    // 4. Õý³£²éÑ¯
+    // 4. 正常查询
     let mut result = Output {
         ip: client_ip_str.clone(),
         country: None,
@@ -323,25 +323,25 @@ async fn lookup(
                     }
                 }
                 Ok(None) => {
-                    result.asn_error = Some("IP Î´ÔÚ ipinfo_lite.mmdb ÖÐÕÒµ½".to_string());
+                    result.asn_error = Some("IP 未在 ipinfo_lite.mmdb 中找到".to_string());
                 }
                 Err(e) => {
-                    result.asn_error = Some(format!("ipinfo_lite ²éÑ¯Ê§°Ü: {}", e));
+                    result.asn_error = Some(format!("ipinfo_lite 查询失败: {}", e));
                 }
             }
         }
         Err(e) => {
-            result.asn_error = Some(format!("ipinfo_lite ²éÑ¯Ê§°Ü: {}", e));
+            result.asn_error = Some(format!("ipinfo_lite 查询失败: {}", e));
         }
     }
 
-    // 5. ¸üÐÂ»º´æ£¨¼òµ¥ÏÞÖÆ×î´ó´óÐ¡£©
+    // 5. 更新缓存（简单限制最大大小）
     const MAX_CACHE_SIZE: usize = 100_000;
     if state.inner.cache.len() < MAX_CACHE_SIZE {
         state.inner.cache.insert(ip, result.clone());
     }
 
-    // 6. Metrics & ·µ»Ø
+    // 6. Metrics & response
     let elapsed = timer.elapsed().as_secs_f64();
     HTTP_REQUEST_DURATION_SECONDS
         .with_label_values(&["/", "GET"])
@@ -377,7 +377,7 @@ async fn reload(
         load_mmap_reader("./ipinfo_lite.mmdb"),
     ) {
         (Ok(city), Ok(asn)) => {
-            // Zero-copy reload£ºArcSwap »áÈÃ¾É Arc ³ÖÐø´æÔÚÖ±µ½ËùÓÐÒýÓÃÊÍ·Å
+            // Zero-copy reload: ArcSwap keeps old Arcs alive until all references drop.
             state.inner.city_db.store(Arc::new(city));
             state.inner.asn_db.store(Arc::new(asn));
 
@@ -499,14 +499,14 @@ async fn openapi(
         "paths": {
             "/": {
                 "get": {
-                    "summary": "¸ù¾Ý IP ²éÑ¯µØÀíÎ»ÖÃÓë ASN ÐÅÏ¢",
+                    "summary": "根据 IP 查询地理位置与 ASN 信息",
                     "parameters": [
                         {
                             "name": "ip",
                             "in": "query",
                             "required": false,
                             "schema": { "type": "string", "format": "ip" },
-                            "description": "Òª²éÑ¯µÄ IP µØÖ·£¬²»´«ÔòÊ¹ÓÃ¿Í»§¶Ë IP"
+                            "description": "要查询的 IP 地址，不传则使用客户端 IP"
                         }
                     ],
                     "responses": {
@@ -519,17 +519,17 @@ async fn openapi(
                             }
                         },
                         "400": {
-                            "description": "·Ç·¨ IP"
+                            "description": "非法 IP"
                         }
                     }
                 }
             },
             "/reload": {
                 "post": {
-                    "summary": "ÖØÐÂ¼ÓÔØ mmdb Êý¾Ý¿â£¨ÈÈ¸üÐÂ£©",
+                    "summary": "重新加载 mmdb 数据库（热更新）",
                     "responses": {
-                        "200": { "description": "ÖØÐÂ¼ÓÔØ³É¹¦" },
-                        "500": { "description": "¼ÓÔØÊ§°Ü" }
+                        "200": { "description": "重新加载成功" },
+                        "500": { "description": "加载失败" }
                     }
                 }
             },
@@ -538,7 +538,7 @@ async fn openapi(
                     "summary": "Prometheus metrics",
                     "responses": {
                         "200": {
-                            "description": "Prometheus ÎÄ±¾¸ñÊ½µÄ metrics",
+                            "description": "Prometheus 文本格式的 metrics",
                             "content": {
                                 "text/plain": {}
                             }
@@ -584,7 +584,7 @@ async fn openapi(
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    println!("·þÎñÆô¶¯ÓÚ http://0.0.0.0:8080/");
+    println!("服务启动于 http://0.0.0.0:8080/");
 
     let city_db = load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb ¼ÓÔØÊ§°Ü");
     let asn_db = load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb ¼ÓÔØÊ§°Ü");
