@@ -7,13 +7,6 @@ use axum::{
 };
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use axum::{
-    extract::{ConnectInfo, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
 use maxminddb::{geoip2, Reader};
 use maxminddb::geoip2::Names;
 use memmap2::Mmap;
@@ -24,10 +17,12 @@ use prometheus::{
 };
 use serde::Serialize;
 use serde_json::json;
+#[cfg(target_family = "unix")]
+use nix::unistd::{setgid, setuid, Gid, Uid, User};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::Result as IoResult;
+use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -100,6 +95,58 @@ struct AppConfig {
 struct AppState {
     inner: Arc<DbState>,
     config: Arc<AppConfig>,
+}
+
+struct CliOptions {
+    port: u16,
+    run_as: Option<String>,
+}
+
+fn parse_args() -> Result<CliOptions, String> {
+    let mut port: u16 = 8080;
+    let mut run_as: Option<String> = None;
+    let mut args = env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-p" | "--port" => {
+                let val = args
+                    .next()
+                    .ok_or_else(|| "缺少端口号，请在 -p 后提供一个数值".to_string())?;
+                port = val
+                    .parse::<u16>()
+                    .map_err(|_| format!("无效的端口号: {val}"))?;
+            }
+            "-u" | "--user" => {
+                let val = args
+                    .next()
+                    .ok_or_else(|| "缺少用户名称，请在 -u 后提供一个用户名".to_string())?;
+                run_as = Some(val);
+            }
+            _ => return Err(format!("未知参数: {arg}")),
+        }
+    }
+
+    Ok(CliOptions { port, run_as })
+}
+
+#[cfg(target_family = "unix")]
+fn switch_user(username: &str) -> Result<(), String> {
+    let user = User::from_name(username)
+        .map_err(|e| format!("查询用户失败: {e}"))?
+        .ok_or_else(|| format!("用户不存在: {username}"))?;
+
+    setgid(Gid::from_raw(user.gid.into()))
+        .map_err(|e| format!("切换到目标用户组失败: {e}"))?;
+    setuid(Uid::from_raw(user.uid.into()))
+        .map_err(|e| format!("切换到目标用户失败: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_family = "unix"))]
+fn switch_user(username: &str) -> Result<(), String> {
+    let _ = username;
+    Err("切换用户仅在类 Unix 平台受支持".to_string())
 }
 
 struct CachedEntry {
@@ -253,7 +300,7 @@ async fn lookup(
             .unwrap_or_else(|| peer.ip().to_string())
     });
 
-    // 2. ½âÎö IP
+    // 2. 解析 IP
     let ip: IpAddr = match client_ip_str.parse() {
         Ok(ip) => ip,
         Err(_) => {
@@ -280,18 +327,18 @@ async fn lookup(
         } else {
             cached.expires_at = now + CACHE_TTL;
             let mut res = cached.data.clone();
-        // Ensure the ip field mirrors the request string (usually identical).
-        res.ip = client_ip_str.clone();
+            // Ensure the ip field mirrors the request string (usually identical).
+            res.ip = client_ip_str.clone();
 
-        let elapsed = timer.elapsed().as_secs_f64();
-        HTTP_REQUEST_DURATION_SECONDS
-            .with_label_values(&["/", "GET"])
-            .observe(elapsed);
-        HTTP_REQUESTS_TOTAL
-            .with_label_values(&["/", "GET", "200"])
-            .inc();
+            let elapsed = timer.elapsed().as_secs_f64();
+            HTTP_REQUEST_DURATION_SECONDS
+                .with_label_values(&["/", "GET"])
+                .observe(elapsed);
+            HTTP_REQUESTS_TOTAL
+                .with_label_values(&["/", "GET", "200"])
+                .inc();
 
-        return Json(res).into_response();
+            return Json(res).into_response();
         }
     }
 
@@ -511,7 +558,7 @@ async fn metrics(
         .into_response()
 }
 
-// Swagger/OpenAPI£¨¼òÒ×°æ£©
+// Swagger/OpenAPI（简易版）
 async fn openapi(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -552,7 +599,7 @@ async fn openapi(
                     ],
                     "responses": {
                         "200": {
-                            "description": "²éÑ¯³É¹¦",
+                            "description": "查询成功",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/Output" }
@@ -625,7 +672,7 @@ async fn openapi(
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    println!("服务启动于 http://0.0.0.0:8080/");
+    let cli = parse_args().map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
 
     let city_db =
         load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb 加载失败");
@@ -647,6 +694,15 @@ async fn main() -> std::io::Result<()> {
 
     start_cache_cleaner(state.inner.cache.clone());
 
+    let addr = format!("0.0.0.0:{}", cli.port);
+    let listener = TcpListener::bind(&addr).await?;
+
+    if let Some(username) = cli.run_as.as_deref() {
+        switch_user(username).map_err(|e| IoError::new(ErrorKind::PermissionDenied, e))?;
+    }
+
+    println!("服务启动于 http://{addr}/");
+
     let app = Router::new()
         .route("/", get(lookup))
         .route("/reload", post(reload))
@@ -654,7 +710,6 @@ async fn main() -> std::io::Result<()> {
         .route("/openapi.json", get(openapi))
         .with_state(state);
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
