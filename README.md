@@ -6,7 +6,7 @@
 
 ## English
 
-A small Actix Web service that performs IP geolocation and ASN lookups using MaxMind-compatible MMDB databases. It exposes Prometheus metrics, supports hot-reloading of the database files, and returns a simple JSON payload for each lookup.
+A small Axum-based service that performs IP geolocation and ASN lookups using MaxMind-compatible MMDB databases. It exposes Prometheus metrics, supports hot-reloading of the database files, and returns a simple JSON payload for each lookup.
 
 ### Features
 - GeoLite2 City and ASN lookups backed by memory-mapped MMDB readers.
@@ -64,7 +64,7 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 - Errors: bad input returns HTTP `400`; reload failures return `500` with details about which database failed to load.
 
 ### Development
-- Main crates: `actix-web`, `arc-swap`, `dashmap`, `maxminddb`, `memmap2`, `prometheus`, `serde`, `serde_json`.
+- Main crates: `axum`, `tokio`, `arc-swap`, `dashmap`, `maxminddb`, `memmap2`, `prometheus`, `serde`, `serde_json`.
 - To verify builds locally:
   ```bash
   cargo check
@@ -75,7 +75,7 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 
 ## 简体中文
 
-这是一个使用 Actix Web 编写的小型服务，利用兼容 MaxMind 的 MMDB 数据库完成 IP 地理位置和 ASN 查询。它提供 Prometheus 指标、支持热重载数据库文件，并为每次查询返回简洁的 JSON 结果。
+这是一个使用 Axum 构建的小型服务，利用兼容 MaxMind 的 MMDB 数据库完成 IP 地理位置和 ASN 查询。它提供 Prometheus 指标、支持热重载数据库文件，并为每次查询返回简洁的 JSON 结果。
 
 ### 功能
 - 使用内存映射的 MMDB 读取器查询 GeoLite2 城市库和 ASN 库。
@@ -133,7 +133,7 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 - 错误处理：非法输入返回 HTTP `400`；重载失败返回 `500` 并指明加载失败的数据库。
 
 ### 开发
-- 主要依赖：`actix-web`、`arc-swap`、`dashmap`、`maxminddb`、`memmap2`、`prometheus`、`serde`、`serde_json`。
+- 主要依赖：`axum`、`tokio`、`arc-swap`、`dashmap`、`maxminddb`、`memmap2`、`prometheus`、`serde`、`serde_json`。
 - 本地校验构建：
   ```bash
   cargo check
