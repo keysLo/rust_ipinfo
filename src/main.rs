@@ -1,19 +1,21 @@
+use arc_swap::ArcSwap;
 use axum::{
+    Json, Router,
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use maxminddb::{geoip2, Reader};
 use maxminddb::geoip2::Names;
+use maxminddb::{Reader, geoip2};
 use memmap2::Mmap;
+#[cfg(target_family = "unix")]
+use nix::unistd::{Gid, Uid, User, setgid, setuid};
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, Encoder, HistogramVec, IntCounterVec,
-    TextEncoder,
+    Encoder, HistogramVec, IntCounterVec, TextEncoder, register_histogram_vec,
+    register_int_counter_vec,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -89,6 +91,7 @@ struct DbState {
 #[derive(Clone)]
 struct AppConfig {
     restrict_admin_to_localhost: bool,
+    max_cache_size: usize,
 }
 
 #[derive(Clone)]
@@ -100,11 +103,13 @@ struct AppState {
 struct CliOptions {
     port: u16,
     run_as: Option<String>,
+    max_cache_size: usize,
 }
 
 fn parse_args() -> Result<CliOptions, String> {
     let mut port: u16 = 8080;
     let mut run_as: Option<String> = None;
+    let mut max_cache_size: usize = 100_000;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -123,11 +128,26 @@ fn parse_args() -> Result<CliOptions, String> {
                     .ok_or_else(|| "缺少用户名称，请在 -u 后提供一个用户名".to_string())?;
                 run_as = Some(val);
             }
+            "-c" | "--cache-size" => {
+                let val = args
+                    .next()
+                    .ok_or_else(|| "缺少缓存大小，请在 -c 后提供一个数值".to_string())?;
+                max_cache_size = val
+                    .parse::<usize>()
+                    .map_err(|_| format!("无效的缓存大小: {val}"))?;
+                if max_cache_size == 0 {
+                    return Err("缓存大小必须大于 0".to_string());
+                }
+            }
             _ => return Err(format!("未知参数: {arg}")),
         }
     }
 
-    Ok(CliOptions { port, run_as })
+    Ok(CliOptions {
+        port,
+        run_as,
+        max_cache_size,
+    })
 }
 
 #[cfg(target_family = "unix")]
@@ -136,10 +156,8 @@ fn switch_user(username: &str) -> Result<(), String> {
         .map_err(|e| format!("查询用户失败: {e}"))?
         .ok_or_else(|| format!("用户不存在: {username}"))?;
 
-    setgid(Gid::from_raw(user.gid.into()))
-        .map_err(|e| format!("切换到目标用户组失败: {e}"))?;
-    setuid(Uid::from_raw(user.uid.into()))
-        .map_err(|e| format!("切换到目标用户失败: {e}"))?;
+    setgid(Gid::from_raw(user.gid.into())).map_err(|e| format!("切换到目标用户组失败: {e}"))?;
+    setuid(Uid::from_raw(user.uid.into())).map_err(|e| format!("切换到目标用户失败: {e}"))?;
     Ok(())
 }
 
@@ -155,6 +173,7 @@ struct CachedEntry {
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const EVICT_GRACE: Duration = Duration::from_secs(5 * 60);
 
 fn admin_local_only_enabled() -> bool {
     env::var("ADMIN_LOCAL_ONLY")
@@ -173,6 +192,35 @@ fn load_mmap_reader(path: &str) -> IoResult<Reader<Mmap>> {
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
     Reader::from_source(mmap).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+fn enforce_cache_limit(cache: &DashMap<IpAddr, CachedEntry>, max_cache_size: usize) {
+    let now = Instant::now();
+    if cache.len() < max_cache_size {
+        return;
+    }
+
+    // First pass: remove expired or near-expiry entries to free space proactively.
+    cache.retain(|_, entry| entry.expires_at > now + EVICT_GRACE);
+    if cache.len() < max_cache_size {
+        return;
+    }
+
+    // Second pass: remove the oldest entries until under limit.
+    let mut entries: Vec<(IpAddr, Instant)> = cache
+        .iter()
+        .map(|ref_multi| (*ref_multi.key(), ref_multi.value().expires_at))
+        .collect();
+    entries.sort_by_key(|(_, expires_at)| *expires_at);
+
+    let mut remove_needed = cache.len().saturating_sub(max_cache_size) + 1;
+    for (key, _) in entries {
+        if remove_needed == 0 {
+            break;
+        }
+        cache.remove(&key);
+        remove_needed -= 1;
+    }
 }
 
 fn parse_ip_from_addr(addr: &str) -> Option<IpAddr> {
@@ -371,8 +419,7 @@ async fn lookup(
                 result.city = english_name(&city.city.names);
             }
             Ok(None) => {
-                result.geolocation_error =
-                    Some("IP 未在 GeoLite2-City.mmdb 中找到".to_string());
+                result.geolocation_error = Some("IP 未在 GeoLite2-City.mmdb 中找到".to_string());
             }
             Err(e) => {
                 result.geolocation_error = Some(format!("GeoLite2-City 查询失败: {}", e));
@@ -417,9 +464,9 @@ async fn lookup(
         }
     }
 
-    // 5. 更新缓存（简单限制最大大小）
-    const MAX_CACHE_SIZE: usize = 100_000;
-    if state.inner.cache.len() < MAX_CACHE_SIZE {
+    // 5. 更新缓存（带可配置的最大大小）
+    enforce_cache_limit(&state.inner.cache, state.config.max_cache_size);
+    if state.inner.cache.len() < state.config.max_cache_size {
         state.inner.cache.insert(
             ip,
             CachedEntry {
@@ -674,13 +721,12 @@ async fn openapi(
 async fn main() -> std::io::Result<()> {
     let cli = parse_args().map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
 
-    let city_db =
-        load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb 加载失败");
-    let asn_db =
-        load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb 加载失败");
+    let city_db = load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb 加载失败");
+    let asn_db = load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb 加载失败");
 
     let config = Arc::new(AppConfig {
         restrict_admin_to_localhost: admin_local_only_enabled(),
+        max_cache_size: cli.max_cache_size,
     });
 
     let state = AppState {
@@ -710,7 +756,10 @@ async fn main() -> std::io::Result<()> {
         .route("/openapi.json", get(openapi))
         .with_state(state);
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
