@@ -19,6 +19,8 @@ use prometheus::{
 };
 use serde::Serialize;
 use serde_json::json;
+#[cfg(target_family = "unix")]
+use nix::unistd::{setgid, setuid, Gid, Uid, User};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
