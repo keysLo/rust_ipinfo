@@ -1,3 +1,10 @@
+use axum::{
+    extract::{ConnectInfo, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use axum::{
@@ -23,8 +30,9 @@ use std::fs::File;
 use std::io::Result as IoResult;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::time;
 
 // ---------------- Metrics ----------------
 
@@ -80,7 +88,7 @@ fn english_name(names: &Names<'_>) -> Option<String> {
 struct DbState {
     city_db: ArcSwap<Reader<Mmap>>,
     asn_db: ArcSwap<Reader<Mmap>>,
-    cache: DashMap<IpAddr, Output>,
+    cache: Arc<DashMap<IpAddr, CachedEntry>>,
 }
 
 #[derive(Clone)]
@@ -93,6 +101,13 @@ struct AppState {
     inner: Arc<DbState>,
     config: Arc<AppConfig>,
 }
+
+struct CachedEntry {
+    data: Output,
+    expires_at: Instant,
+}
+
+const CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 fn admin_local_only_enabled() -> bool {
     env::var("ADMIN_LOCAL_ONLY")
@@ -209,6 +224,17 @@ fn guard_admin_endpoint(
     }
 }
 
+fn start_cache_cleaner(cache: Arc<DashMap<IpAddr, CachedEntry>>) {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(60 * 60));
+        loop {
+            interval.tick().await;
+            let now = Instant::now();
+            cache.retain(|_, entry| entry.expires_at > now);
+        }
+    });
+}
+
 // ---------------- Handlers ----------------
 
 async fn lookup(
@@ -245,8 +271,15 @@ async fn lookup(
     };
 
     // 3. 查询缓存
-    if let Some(cached) = state.inner.cache.get(&ip) {
-        let mut res = cached.clone();
+    let now = Instant::now();
+    if let Some(mut cached) = state.inner.cache.get_mut(&ip) {
+        if cached.expires_at <= now {
+            // Expired entry: drop guard before removal
+            drop(cached);
+            state.inner.cache.remove(&ip);
+        } else {
+            cached.expires_at = now + CACHE_TTL;
+            let mut res = cached.data.clone();
         // Ensure the ip field mirrors the request string (usually identical).
         res.ip = client_ip_str.clone();
 
@@ -259,6 +292,7 @@ async fn lookup(
             .inc();
 
         return Json(res).into_response();
+        }
     }
 
     // 4. 正常查询
@@ -339,7 +373,13 @@ async fn lookup(
     // 5. 更新缓存（简单限制最大大小）
     const MAX_CACHE_SIZE: usize = 100_000;
     if state.inner.cache.len() < MAX_CACHE_SIZE {
-        state.inner.cache.insert(ip, result.clone());
+        state.inner.cache.insert(
+            ip,
+            CachedEntry {
+                data: result.clone(),
+                expires_at: Instant::now() + CACHE_TTL,
+            },
+        );
     }
 
     // 6. Metrics & response
@@ -390,7 +430,7 @@ async fn reload(
                 .with_label_values(&["/reload", "POST", "200"])
                 .inc();
 
-            (StatusCode::OK, "Êý¾Ý¿âÒÑÖØÐÂ¼ÓÔØ").into_response()
+            (StatusCode::OK, "数据仓已重新加载").into_response()
         }
         (Err(e), _) => {
             HTTP_REQUESTS_TOTAL
@@ -398,7 +438,7 @@ async fn reload(
                 .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Geo DB ¼ÓÔØÊ§°Ü: {}", e),
+                format!("Geo DB 加载失败: {}", e),
             )
                 .into_response()
         }
@@ -408,7 +448,7 @@ async fn reload(
                 .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("ASN DB ¼ÓÔØÊ§°Ü: {}", e),
+                format!("ASN DB 加载失败: {}", e),
             )
                 .into_response()
         }
@@ -587,8 +627,10 @@ async fn openapi(
 async fn main() -> std::io::Result<()> {
     println!("服务启动于 http://0.0.0.0:8080/");
 
-    let city_db = load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb ¼ÓÔØÊ§°Ü");
-    let asn_db = load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb ¼ÓÔØÊ§°Ü");
+    let city_db =
+        load_mmap_reader("./GeoLite2-City.mmdb").expect("GeoLite2-City.mmdb 加载失败");
+    let asn_db =
+        load_mmap_reader("./ipinfo_lite.mmdb").expect("ipinfo_lite.mmdb 加载失败");
 
     let config = Arc::new(AppConfig {
         restrict_admin_to_localhost: admin_local_only_enabled(),
@@ -598,10 +640,12 @@ async fn main() -> std::io::Result<()> {
         inner: Arc::new(DbState {
             city_db: ArcSwap::new(Arc::new(city_db)),
             asn_db: ArcSwap::new(Arc::new(asn_db)),
-            cache: DashMap::new(),
+            cache: Arc::new(DashMap::new()),
         }),
         config,
     };
+
+    start_cache_cleaner(state.inner.cache.clone());
 
     let app = Router::new()
         .route("/", get(lookup))
