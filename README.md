@@ -24,10 +24,16 @@ A small Axum-based service that performs IP geolocation and ASN lookups using Ma
 
 ### Running the service
 1. Ensure the two MMDB files are present in the current directory.
-2. Start the server (defaults to `0.0.0.0:8080`):
+2. Start the server (defaults to `0.0.0.0:8080` and 100,000 cache entries):
    ```bash
    cargo run
    ```
+3. Optional flags:
+   - `-p, --port <number>`: choose a listen port. Example: `./target/release/rust_ipinfo -p 8000`
+   - `-c, --cache-size <number>`: maximum cache entries (default `100000`).
+   - `-u, --user <name>`: drop privileges to the given user (Unix only).
+
+   Note: the port value must be numeric (e.g., `-p 8000`); using non-numeric values (such as `-p www`) will fail to start with an invalid input error.
 
 ### Optional security toggle (ADMIN_LOCAL_ONLY)
 The admin-style endpoints (`/reload`, `/metrics`, `/openapi.json`) can be locked down to localhost. Control this via the `ADMIN_LOCAL_ONLY` environment variable at process start:
@@ -60,7 +66,7 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 
 ### Data handling notes
 - Lookups are memory-mapped for performance (`memmap2`) and swapped atomically on reload (`ArcSwap`).
-- A `DashMap` cache (up to 100,000 entries) stores responses by `IpAddr` for repeat queries.
+- A `DashMap` cache (default up to 100,000 entries, configurable via `-c/--cache-size`) stores responses by `IpAddr` for repeat queries.
 - Errors: bad input returns HTTP `400`; reload failures return `500` with details about which database failed to load.
 
 ### Development
@@ -93,10 +99,16 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 
 ### 运行服务
 1. 确认上述两个 MMDB 文件已在当前目录。
-2. 启动服务（默认监听 `0.0.0.0:8080`）：
+2. 启动服务（默认监听 `0.0.0.0:8080`，缓存上限 100,000 条）：
    ```bash
    cargo run
    ```
+3. 可选参数：
+   - `-p, --port <数字>`：指定监听端口，例如 `./target/release/rust_ipinfo -p 8000`
+   - `-c, --cache-size <数字>`：设置缓存最大条目（默认 `100000`）。
+   - `-u, --user <用户名>`：以指定用户身份运行（仅类 Unix 平台有效）。
+
+   注意：端口必须为数字（如 `-p 8000`），传入非数字（如 `-p www`）会直接报错并退出。
 
 ### 可选安全开关（ADMIN_LOCAL_ONLY）
 管理类接口可限制仅本地访问。启动前设置环境变量 `ADMIN_LOCAL_ONLY`：
@@ -129,7 +141,7 @@ ADMIN_LOCAL_ONLY=1 nohup ./target/release/ipinfo > /dev/null 2>&1 &
 
 ### 数据处理说明
 - 查询使用内存映射（`memmap2`），通过 `ArcSwap` 原子替换实现热重载。
-- `DashMap` 缓存（最多 100,000 条）按 `IpAddr` 存储响应，加速重复查询。
+- `DashMap` 缓存（默认最多 100,000 条，可通过 `-c/--cache-size` 配置）按 `IpAddr` 存储响应，加速重复查询。
 - 错误处理：非法输入返回 HTTP `400`；重载失败返回 `500` 并指明加载失败的数据库。
 
 ### 开发
