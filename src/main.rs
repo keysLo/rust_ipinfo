@@ -10,8 +10,6 @@ use dashmap::DashMap;
 use maxminddb::geoip2::Names;
 use maxminddb::{Reader, geoip2};
 use memmap2::Mmap;
-#[cfg(target_family = "unix")]
-use nix::unistd::{Gid, Uid, User, setgid, setuid};
 use once_cell::sync::Lazy;
 use prometheus::{
     Encoder, HistogramVec, IntCounterVec, TextEncoder, register_histogram_vec,
